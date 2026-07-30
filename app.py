@@ -66,7 +66,8 @@ def tela_principal():
         "1. Abertura do Dia (PDF)", 
         "2. Portaria do Café", 
         "3. Dashboard Diário", 
-        "4. Relatórios Gerenciais"
+        "4. Relatórios Gerenciais",
+        "5. Trocar Senha"
     ])
     
     st.sidebar.markdown("---")
@@ -419,6 +420,51 @@ def tela_principal():
                 )
         except Exception as e:
             st.error(f"Erro ao gerar relatórios.")
+
+    # ==========================================
+    # MENU 5: TROCAR SENHA
+    # ==========================================
+    elif menu == "5. Trocar Senha":
+        st.header("🔑 Trocar Senha de Acesso")
+        
+        if st.session_state["usuario_logado"] == "admin (Emergência)":
+            st.warning("⚠️ O login de emergência não pode alterar a senha por aqui. Acesse a planilha do Google e crie a aba 'Usuarios'.")
+        else:
+            with st.form("form_troca_senha"):
+                st.write(f"Alterando senha do usuário: **{st.session_state['usuario_logado']}**")
+                
+                senha_atual = st.text_input("Senha Atual", type="password")
+                nova_senha = st.text_input("Nova Senha", type="password")
+                confirma_senha = st.text_input("Confirme a Nova Senha", type="password")
+                
+                submit_senha = st.form_submit_button("Atualizar Senha", type="primary")
+                
+                if submit_senha:
+                    if nova_senha != confirma_senha:
+                        st.error("As novas senhas digitadas não coincidem. Tente novamente.")
+                    elif len(nova_senha) < 4:
+                        st.error("A nova senha deve ter no mínimo 4 caracteres.")
+                    else:
+                        try:
+                            # Carrega a tabela de usuários
+                            df_usuarios = conn.read(worksheet="Usuarios", ttl=0).dropna(how="all")
+                            usuario_logado = st.session_state["usuario_logado"]
+                            
+                            # Encontra a linha do usuário logado
+                            filtro_usuario = df_usuarios["Usuario"].astype(str) == usuario_logado
+                            senha_salva = str(df_usuarios.loc[filtro_usuario, "Senha"].values[0])
+                            
+                            if senha_atual != senha_salva:
+                                st.error("A senha atual está incorreta.")
+                            else:
+                                # Atualiza a senha na tabela
+                                df_usuarios.loc[filtro_usuario, "Senha"] = nova_senha
+                                
+                                # Grava na planilha do Google
+                                conn.update(worksheet="Usuarios", data=df_usuarios)
+                                st.success("Senha alterada com sucesso! Na próxima vez, utilize a sua nova senha.")
+                        except Exception as e:
+                            st.error("Erro ao alterar a senha. Verifique a planilha.")
 
 if not st.session_state["logado"]:
     tela_login()
