@@ -98,7 +98,7 @@ def tela_principal():
                 
                 if arquivo_pdf is not None:
                     with st.spinner('Extraindo dados do PDF...'):
-                        padrao = re.compile(r"^(.*?)\s+(\d{3,5})\s+(\d+)\s+(\d+)\s+(?:(Included)\s+)?([YN])\s+([A-Z0-9]+)\s+(\d{2}-[A-Z]{3}-\d{2})\s+(\d{2}-[A-Z]{3}-\d{2})(?:\s+(.*))?$")
+                        padrao = re.compile(r"^(.*?)\s+(\d{3,5})\s+(\d+)\s+(\d+)\s+(?:(Included)\s+)?([YN])\s+(\S+)\s+(\d{2}-[A-Z]{3}-\d{2})\s+(\d{2}-[A-Z]{3}-\d{2})(?:\s+(.*))?$")
                         linhas_extraidas = []
                         
                         with pdfplumber.open(arquivo_pdf) as pdf:
