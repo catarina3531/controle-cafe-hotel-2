@@ -75,7 +75,7 @@ def tela_principal():
         st.session_state["logado"] = False
         st.rerun()
 
-    # ==========================================
+   # ==========================================
     # MENU 1: UPLOAD DO PDF
     # ==========================================
     if menu == "1. Abertura do Dia (PDF)":
@@ -97,45 +97,67 @@ def tela_principal():
                 arquivo_pdf = st.file_uploader("Relatório de Hóspedes (PDF)", type=["pdf"])
                 
                 if arquivo_pdf is not None:
-                    with st.spinner('Extraindo dados do PDF...'):
+                    with st.spinner('Validando data e extraindo informações do PDF...'):
+                        # Regex para a linha do hóspede (Já com a correção do Rate Code \S+)
                         padrao = re.compile(r"^(.*?)\s+(\d{3,5})\s+(\d+)\s+(\d+)\s+(?:(Included)\s+)?([YN])\s+(\S+)\s+(\d{2}-[A-Z]{3}-\d{2})\s+(\d{2}-[A-Z]{3}-\d{2})(?:\s+(.*))?$")
+                        # Regex para capturar a data no cabeçalho do Opera (Formato: YYYY-MM-DD)
+                        padrao_data_cabecalho = re.compile(r"(\d{4}-\d{2}-\d{2})")
+                        
                         linhas_extraidas = []
+                        data_pdf_valida = False
                         
                         with pdfplumber.open(arquivo_pdf) as pdf:
-                            for pagina in pdf.pages:
-                                texto = pagina.extract_text()
-                                if texto:
-                                    for linha in texto.split('\n'):
-                                        match = padrao.match(linha.strip())
-                                        if match:
-                                            linhas_extraidas.append({
-                                                "Data": data_str,
-                                                "Hospede": match.group(1),
-                                                "Quarto": match.group(2),
-                                                "Adultos": int(match.group(3)),
-                                                "Criancas": int(match.group(4)),
-                                                "Incluso": "Sim" if match.group(5) == "Included" else "Não"
-                                            })
-                        
-                        df_pdf = pd.DataFrame(linhas_extraidas)
-                        
-                    if not df_pdf.empty:
-                        st.success(f"Sucesso! {len(df_pdf)} apartamentos encontrados no PDF.")
-                        st.dataframe(df_pdf, use_container_width=True)
-                        
-                        if st.button("Gravar Previsão no Banco de Dados", type="primary"):
-                            try:
-                                df_previsao_atual = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
-                                df_previsao_atual = df_previsao_atual[df_previsao_atual["Data"] != data_str]
-                                df_atualizado = pd.concat([df_previsao_atual, df_pdf], ignore_index=True)
-                            except:
-                                df_atualizado = df_pdf
+                            # 1. VALIDAÇÃO DA DATA (Lê apenas a primeira página primeiro)
+                            primeira_pagina = pdf.pages[0].extract_text()
+                            match_data = padrao_data_cabecalho.search(primeira_pagina)
+                            
+                            if match_data:
+                                data_do_pdf = match_data.group(1)
+                                if data_do_pdf != data_str:
+                                    st.error(f"❌ ERRO DE DATA: O PDF inserido é do dia {data_do_pdf}, mas você está operando o dia {data_str}. Selecione a data correta no menu lateral ou insira o arquivo certo.")
+                                else:
+                                    data_pdf_valida = True
+                            else:
+                                st.error("❌ Não foi possível encontrar a data no cabeçalho do PDF. O arquivo pode estar corrompido ou ser de outro formato.")
+
+                            # 2. SE A DATA FOR VÁLIDA, EXTRAI OS HÓSPEDES
+                            if data_pdf_valida:
+                                for pagina in pdf.pages:
+                                    texto = pagina.extract_text()
+                                    if texto:
+                                        for linha in texto.split('\n'):
+                                            match = padrao.match(linha.strip())
+                                            if match:
+                                                linhas_extraidas.append({
+                                                    "Data": data_str,
+                                                    "Hospede": match.group(1),
+                                                    "Quarto": match.group(2),
+                                                    "Adultos": int(match.group(3)),
+                                                    "Criancas": int(match.group(4)),
+                                                    "Incluso": "Sim" if match.group(5) == "Included" else "Não"
+                                                })
                                 
-                            conn.update(worksheet="Previsao", data=df_atualizado)
-                            st.success("Dados salvos no Google Sheets! A Portaria já pode iniciar.")
-                            st.rerun()
-                    else:
-                        st.error("Nenhum hóspede encontrado. Verifique se é o PDF correto.")
+                        # 3. EXIBE E GRAVA OS DADOS
+                        if data_pdf_valida:
+                            df_pdf = pd.DataFrame(linhas_extraidas)
+                            
+                            if not df_pdf.empty:
+                                st.success(f"Sucesso! {len(df_pdf)} apartamentos encontrados no PDF do dia {data_str}.")
+                                st.dataframe(df_pdf, use_container_width=True)
+                                
+                                if st.button("Gravar Previsão no Banco de Dados", type="primary"):
+                                    try:
+                                        df_previsao_atual = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
+                                        df_previsao_atual = df_previsao_atual[df_previsao_atual["Data"] != data_str]
+                                        df_atualizado = pd.concat([df_previsao_atual, df_pdf], ignore_index=True)
+                                    except:
+                                        df_atualizado = df_pdf
+                                        
+                                    conn.update(worksheet="Previsao", data=df_atualizado)
+                                    st.success("Dados salvos no Google Sheets! A Portaria já pode iniciar.")
+                                    st.rerun()
+                            else:
+                                st.error("Nenhum hóspede encontrado. Verifique se é o PDF correto do Opera.")
 
     # ==========================================
     # MENU 2: LANÇAR CONSUMO
