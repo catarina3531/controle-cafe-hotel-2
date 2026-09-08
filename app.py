@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from streamlit_gsheets import GSheetsConnection
+import plotly.express as px
 
 # Configuração da Página
 st.set_page_config(page_title="Controle de Café da Manhã", layout="wide")
@@ -54,6 +55,9 @@ def tela_principal():
     data_operacao = st.sidebar.date_input("📅 Data de Operação", datetime.today())
     data_str = data_operacao.strftime("%Y-%m-%d")
     
+    # Hora atual no Brasil (UTC-3)
+    hora_str = (datetime.now() - timedelta(hours=3)).strftime("%H:%M")
+    
     try:
         df_controle = conn.read(worksheet="Controle_Dias", ttl=0).dropna(how="all")
         dia_encerrado = data_str in df_controle["Data"].astype(str).values
@@ -75,7 +79,7 @@ def tela_principal():
         st.session_state["logado"] = False
         st.rerun()
 
-   # ==========================================
+    # ==========================================
     # MENU 1: UPLOAD DO PDF
     # ==========================================
     if menu == "1. Abertura do Dia (PDF)":
@@ -98,16 +102,13 @@ def tela_principal():
                 
                 if arquivo_pdf is not None:
                     with st.spinner('Validando data e extraindo informações do PDF...'):
-                        # Regex para a linha do hóspede (Já com a correção do Rate Code \S+)
                         padrao = re.compile(r"^(.*?)\s+(\d{3,5})\s+(\d+)\s+(\d+)\s+(?:(Included)\s+)?([YN])\s+(\S+)\s+(\d{2}-[A-Z]{3}-\d{2})\s+(\d{2}-[A-Z]{3}-\d{2})(?:\s+(.*))?$")
-                        # Regex para capturar a data no cabeçalho do Opera (Formato: YYYY-MM-DD)
                         padrao_data_cabecalho = re.compile(r"(\d{4}-\d{2}-\d{2})")
                         
                         linhas_extraidas = []
                         data_pdf_valida = False
                         
                         with pdfplumber.open(arquivo_pdf) as pdf:
-                            # 1. VALIDAÇÃO DA DATA (Lê apenas a primeira página primeiro)
                             primeira_pagina = pdf.pages[0].extract_text()
                             match_data = padrao_data_cabecalho.search(primeira_pagina)
                             
@@ -118,9 +119,8 @@ def tela_principal():
                                 else:
                                     data_pdf_valida = True
                             else:
-                                st.error("❌ Não foi possível encontrar a data no cabeçalho do PDF. O arquivo pode estar corrompido ou ser de outro formato.")
+                                st.error("❌ Não foi possível encontrar a data no cabeçalho do PDF. O arquivo pode estar corrompido.")
 
-                            # 2. SE A DATA FOR VÁLIDA, EXTRAI OS HÓSPEDES
                             if data_pdf_valida:
                                 for pagina in pdf.pages:
                                     texto = pagina.extract_text()
@@ -137,10 +137,8 @@ def tela_principal():
                                                     "Incluso": "Sim" if match.group(5) == "Included" else "Não"
                                                 })
                                 
-                        # 3. EXIBE E GRAVA OS DADOS
                         if data_pdf_valida:
                             df_pdf = pd.DataFrame(linhas_extraidas)
-                            
                             if not df_pdf.empty:
                                 st.success(f"Sucesso! {len(df_pdf)} apartamentos encontrados no PDF do dia {data_str}.")
                                 st.dataframe(df_pdf, use_container_width=True)
@@ -157,7 +155,7 @@ def tela_principal():
                                     st.success("Dados salvos no Google Sheets! A Portaria já pode iniciar.")
                                     st.rerun()
                             else:
-                                st.error("Nenhum hóspede encontrado. Verifique se é o PDF correto do Opera.")
+                                st.error("Nenhum hóspede encontrado. Verifique se é o PDF correto.")
 
     # ==========================================
     # MENU 2: LANÇAR CONSUMO
@@ -170,14 +168,18 @@ def tela_principal():
         else:
             aba1, aba2 = st.tabs(["🏨 Lançar Hóspedes (Lista)", "🚶 Lançar Passantes (Avulsos)"])
             
-            # --- ABA 1: HÓSPEDES REGULARES ---
             with aba1:
                 try:
                     df_previsao = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
                     df_previsao = df_previsao[df_previsao["Data"] == data_str]
+                    
+                    # Carrega também o consumo de hoje para checar duplicidades
+                    df_consumo_atual = conn.read(worksheet="Consumo", ttl=0).dropna(how="all")
+                    df_cons_hoje = df_consumo_atual[df_consumo_atual["Data"] == data_str] if not df_consumo_atual.empty else pd.DataFrame()
                 except:
-                    st.warning("Erro ao ler o banco de dados de Previsão.")
+                    st.warning("Erro ao ler o banco de dados.")
                     df_previsao = pd.DataFrame()
+                    df_cons_hoje = pd.DataFrame()
 
                 if df_previsao.empty:
                     st.warning("Nenhuma previsão carregada para esta data. Faça o Upload do PDF primeiro.")
@@ -200,6 +202,7 @@ def tela_principal():
                             
                             with st.form("form_busca"):
                                 consumos_pendentes = []
+                                teve_duplicidade = False
                                 
                                 for index, row in hospedes_encontrados.iterrows():
                                     nome = row["Hospede"]
@@ -207,10 +210,18 @@ def tela_principal():
                                     incluso = row["Incluso"]
                                     prev_adt = int(row["Adultos"])
                                     prev_chd = int(row["Criancas"])
-                                    
                                     marcador = "✅ INCLUSO" if incluso == "Sim" else "❌ NÃO INCLUSO (Cobrar Extras)"
                                     
-                                    st.markdown(f"**Quarto: {quarto_real}** | **Hóspede:** {nome} | **Reserva:** {prev_adt} Adulto(s), {prev_chd} Criança(s) | {marcador}")
+                                    # Verificador de Duplicidade
+                                    ja_consumiu = False
+                                    if not df_cons_hoje.empty:
+                                        ja_consumiu = not df_cons_hoje[(df_cons_hoje["Quarto"].astype(str) == str(quarto_real)) & (df_cons_hoje["Hospede"] == nome)].empty
+                                    
+                                    if ja_consumiu:
+                                        teve_duplicidade = True
+                                        st.warning(f"⚠️ ATENÇÃO: {nome} (Quarto {quarto_real}) já tomou café hoje!")
+                                    
+                                    st.markdown(f"**Quarto: {quarto_real}** | **Hóspede:** {nome} | **Reserva:** {prev_adt} ADT, {prev_chd} CHD | {marcador}")
                                     
                                     col1, col2, col3 = st.columns(3)
                                     with col1:
@@ -230,44 +241,50 @@ def tela_principal():
                                     })
                                     st.markdown("---")
                                 
+                                # Trava de confirmação se houver duplicidade
+                                if teve_duplicidade:
+                                    confirmar_duplicidade = st.checkbox("Estou ciente. O Hóspede já tomou café hoje, desejo lançar novamente e gerar cobrança extra.", value=False)
+                                else:
+                                    confirmar_duplicidade = True
+                                    
                                 submit_consumo = st.form_submit_button("Registrar Entradas Selecionadas", type="primary", use_container_width=True)
                                 
                                 if submit_consumo:
-                                    linhas_para_inserir = []
-                                    for item in consumos_pendentes:
-                                        categorias = ["Adulto", "Criança 0 a 6 anos", "Criança 7 a 11 anos"]
-                                        for cat in categorias:
-                                            for _ in range(item[cat]):
-                                                linhas_para_inserir.append({
-                                                    "Data": data_str,
-                                                    "Quarto": item["Quarto"],
-                                                    "Hospede": item["Hospede"],
-                                                    "Categoria": cat,
-                                                    "Incluso": item["Incluso"],
-                                                    "Registrado_Por": st.session_state["usuario_logado"]
-                                                })
-                                    
-                                    if linhas_para_inserir:
-                                        df_novos_consumos = pd.DataFrame(linhas_para_inserir)
-                                        try:
-                                            df_consumo_atual = conn.read(worksheet="Consumo", ttl=0).dropna(how="all")
-                                            df_atualizado = pd.concat([df_consumo_atual, df_novos_consumos], ignore_index=True)
-                                        except:
-                                            df_atualizado = df_novos_consumos
-                                            
-                                        conn.update(worksheet="Consumo", data=df_atualizado)
-                                        st.success(f"{len(linhas_para_inserir)} café(s) registrado(s) com sucesso!")
+                                    if teve_duplicidade and not confirmar_duplicidade:
+                                        st.error("Para lançar um hóspede novamente, você deve marcar a caixa de confirmação acima.")
                                     else:
-                                        st.warning("Insira pelo menos 1 hóspede para registrar.")
+                                        linhas_para_inserir = []
+                                        for item in consumos_pendentes:
+                                            categorias = ["Adulto", "Criança 0 a 6 anos", "Criança 7 a 11 anos"]
+                                            for cat in categorias:
+                                                for _ in range(item[cat]):
+                                                    linhas_para_inserir.append({
+                                                        "Data": data_str,
+                                                        "Hora": hora_str, # Salva a Hora!
+                                                        "Quarto": item["Quarto"],
+                                                        "Hospede": item["Hospede"],
+                                                        "Categoria": cat,
+                                                        "Incluso": item["Incluso"],
+                                                        "Registrado_Por": st.session_state["usuario_logado"]
+                                                    })
+                                        
+                                        if linhas_para_inserir:
+                                            df_novos_consumos = pd.DataFrame(linhas_para_inserir)
+                                            try:
+                                                df_atualizado = pd.concat([df_consumo_atual, df_novos_consumos], ignore_index=True)
+                                            except:
+                                                df_atualizado = df_novos_consumos
+                                                
+                                            conn.update(worksheet="Consumo", data=df_atualizado)
+                                            st.success(f"{len(linhas_para_inserir)} café(s) registrado(s) com sucesso!")
+                                        else:
+                                            st.warning("Insira pelo menos 1 hóspede para registrar.")
             
-            # --- ABA 2: PASSANTES AVULSOS ---
             with aba2:
                 st.subheader("Registro de Passantes (Avulsos)")
                 st.info("Passantes serão registrados sempre como NÃO INCLUSOS (Extras).")
-                
                 with st.form("form_passante"):
                     nome_passante = st.text_input("Nome do Responsável (Opcional):", value="Passante")
-                    
                     col_p1, col_p2, col_p3 = st.columns(3)
                     with col_p1:
                         pass_adt = st.number_input("Qtd Adultos", min_value=0, max_value=20, value=1)
@@ -277,19 +294,14 @@ def tela_principal():
                         pass_chd_7_11 = st.number_input("Qtd Crianças 7-11", min_value=0, max_value=20, value=0)
                         
                     submit_passante = st.form_submit_button("Registrar Passantes", type="primary", use_container_width=True)
-                    
                     if submit_passante:
                         linhas_passantes = []
-                        quantidades = {
-                            "Adulto": pass_adt,
-                            "Criança 0 a 6 anos": pass_chd_0_6,
-                            "Criança 7 a 11 anos": pass_chd_7_11
-                        }
-                        
+                        quantidades = {"Adulto": pass_adt, "Criança 0 a 6 anos": pass_chd_0_6, "Criança 7 a 11 anos": pass_chd_7_11}
                         for cat, qtd in quantidades.items():
                             for _ in range(qtd):
                                 linhas_passantes.append({
                                     "Data": data_str,
+                                    "Hora": hora_str, # Salva a Hora!
                                     "Quarto": "Passante",
                                     "Hospede": nome_passante,
                                     "Categoria": cat,
@@ -323,11 +335,9 @@ def tela_principal():
             df_prev_hoje = df_previsao[df_previsao["Data"] == data_str] if not df_previsao.empty else pd.DataFrame()
             df_cons_hoje = df_consumo[df_consumo["Data"] == data_str] if not df_consumo.empty else pd.DataFrame()
             
-            # --- CÁLCULOS DE PREVISÃO DETALHADA ---
             if not df_prev_hoje.empty:
                 df_prev_incluso = df_prev_hoje[df_prev_hoje["Incluso"] == "Sim"]
                 df_prev_nao_incluso = df_prev_hoje[df_prev_hoje["Incluso"] == "Não"]
-                
                 prev_total_incluso = df_prev_incluso["Adultos"].sum() + df_prev_incluso["Criancas"].sum()
                 prev_total_nao_incluso = df_prev_nao_incluso["Adultos"].sum() + df_prev_nao_incluso["Criancas"].sum()
             else:
@@ -336,7 +346,6 @@ def tela_principal():
                 
             total_previsto = prev_total_incluso + prev_total_nao_incluso
             
-            # --- CÁLCULOS DE CONSUMO ---
             cons_total = len(df_cons_hoje)
             cons_inclusos = len(df_cons_hoje[df_cons_hoje["Incluso"] == "Sim"]) if not df_cons_hoje.empty else 0
             cons_extras = len(df_cons_hoje[df_cons_hoje["Incluso"] == "Não"]) if not df_cons_hoje.empty else 0
@@ -345,29 +354,24 @@ def tela_principal():
             cons_chd_0_6 = len(df_cons_hoje[df_cons_hoje["Categoria"] == "Criança 0 a 6 anos"]) if not df_cons_hoje.empty else 0
             cons_chd_7_11 = len(df_cons_hoje[df_cons_hoje["Categoria"] == "Criança 7 a 11 anos"]) if not df_cons_hoje.empty else 0
 
-            # --- CÁLCULOS DE FALTANTES ---
             falta_incluso = max(0, prev_total_incluso - cons_inclusos)
             falta_nao_incluso = max(0, prev_total_nao_incluso - cons_extras)
 
-            # --- EXIBIÇÃO DASHBOARD ---
             st.subheader("Balanço de Hóspedes (Previsão vs Realizado)")
             col1, col2, col3 = st.columns(3)
             
-            # Inclusos
             with col1:
                 st.markdown("### 🟢 Inclusos")
                 st.metric("Total Previsto", prev_total_incluso)
                 st.metric("Consumidos", cons_inclusos)
                 st.metric("Falta Descer", falta_incluso)
             
-            # Não Inclusos (Extras da lista)
             with col2:
                 st.markdown("### 🔴 Extras / Não Inclusos")
                 st.metric("Total Previsto", prev_total_nao_incluso)
                 st.metric("Consumidos (Inclui Passantes)", cons_extras)
                 st.metric("Falta Descer (Da Lista)", falta_nao_incluso)
                 
-            # Totais Gerais
             with col3:
                 st.markdown("### 📊 Total Geral")
                 st.metric("Previsão Total", total_previsto)
@@ -387,7 +391,6 @@ def tela_principal():
             else:
                 st.info("Nenhum consumo registrado hoje ainda.")
                 
-            # BOTÃO DE ENCERRAR O DIA
             st.markdown("---")
             if dia_encerrado:
                 st.success("🔒 Este dia foi encerrado com sucesso. Nenhuma alteração pode ser feita.")
@@ -404,44 +407,105 @@ def tela_principal():
             st.error("Erro ao carregar Dashboard. O banco de dados pode estar vazio.")
 
     # ==========================================
-    # MENU 4: RELATÓRIOS GERENCIAIS
+    # MENU 4: RELATÓRIOS GERENCIAIS (ATUALIZADO)
     # ==========================================
     elif menu == "4. Relatórios Gerenciais":
-        st.header("📈 Relatório Mensal / Consolidado")
+        st.header("📈 Relatórios Gerenciais e Inteligência")
         
         try:
             df_consumo = conn.read(worksheet="Consumo", ttl=0).dropna(how="all")
             if df_consumo.empty:
                 st.warning("Não há dados de consumo registrados no sistema.")
             else:
-                df_consumo["Data"] = pd.to_datetime(df_consumo["Data"])
+                # Prepara os dados de data e hora
+                df_consumo["Data"] = pd.to_datetime(df_consumo["Data"], errors='coerce')
                 df_consumo["Mes_Ano"] = df_consumo["Data"].dt.strftime("%m/%Y")
+                df_consumo["Ano"] = df_consumo["Data"].dt.strftime("%Y")
                 
-                meses_disponiveis = df_consumo["Mes_Ano"].unique()
-                mes_selecionado = st.selectbox("Selecione o Mês para Análise:", meses_disponiveis)
+                # Se for dado antigo sem hora, preenche com 08:00 para não quebrar o gráfico
+                if "Hora" not in df_consumo.columns:
+                    df_consumo["Hora"] = "08:00"
+                df_consumo["Hora"] = df_consumo["Hora"].fillna("08:00")
                 
-                df_mes = df_consumo[df_consumo["Mes_Ano"] == mes_selecionado]
+                # Extrai apenas a hora (ex: 07h, 08h)
+                df_consumo["Faixa_Horario"] = df_consumo["Hora"].astype(str).str[:2] + "h"
                 
-                st.subheader(f"Resumo de {mes_selecionado}")
-                col1, col2 = st.columns(2)
-                col1.metric("Total de Cafés Servidos", len(df_mes))
-                col2.metric("Receita de Extras (Cafés Não Inclusos)", len(df_mes[df_mes["Incluso"] == "Não"]))
+                dias_semana = {0: '1-Segunda', 1: '2-Terça', 2: '3-Quarta', 3: '4-Quinta', 4: '5-Sexta', 5: '6-Sábado', 6: '7-Domingo'}
+                df_consumo["Dia_Semana"] = df_consumo["Data"].dt.dayofweek.map(dias_semana)
+
+                # Abas de Filtros Temporais
+                aba_dia, aba_mes, aba_ano = st.tabs(["📅 Visão Diária", "🗓️ Visão Mensal", "📆 Visão Anual"])
                 
-                st.markdown("**Consolidado por Categoria:**")
-                resumo_categoria = df_mes["Categoria"].value_counts().reset_index()
-                resumo_categoria.columns = ["Categoria", "Quantidade"]
-                st.table(resumo_categoria)
+                df_filtrado = pd.DataFrame()
+                titulo_filtro = ""
+
+                with aba_dia:
+                    datas_disp = df_consumo["Data"].dt.strftime("%d/%m/%Y").unique()
+                    data_sel = st.selectbox("Selecione o Dia:", datas_disp)
+                    if data_sel:
+                        df_filtrado = df_consumo[df_consumo["Data"].dt.strftime("%d/%m/%Y") == data_sel]
+                        titulo_filtro = f"Resumo do Dia: {data_sel}"
                 
-                st.markdown("**Exportar Dados:**")
-                csv = df_mes.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Baixar Relatório em Excel/CSV",
-                    data=csv,
-                    file_name=f"Relatorio_Cafe_{mes_selecionado.replace('/','-')}.csv",
-                    mime="text/csv",
-                )
+                with aba_mes:
+                    meses_disp = df_consumo["Mes_Ano"].dropna().unique()
+                    mes_sel = st.selectbox("Selecione o Mês:", meses_disp)
+                    if mes_sel:
+                        df_filtrado = df_consumo[df_consumo["Mes_Ano"] == mes_sel]
+                        titulo_filtro = f"Resumo do Mês: {mes_sel}"
+                
+                with aba_ano:
+                    anos_disp = df_consumo["Ano"].dropna().unique()
+                    ano_sel = st.selectbox("Selecione o Ano:", anos_disp)
+                    if ano_sel:
+                        df_filtrado = df_consumo[df_consumo["Ano"] == ano_sel]
+                        titulo_filtro = f"Resumo do Ano: {ano_sel}"
+
+                if not df_filtrado.empty:
+                    st.markdown("---")
+                    st.subheader(titulo_filtro)
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Total de Cafés Servidos", len(df_filtrado))
+                    col2.metric("Inclusos Consumidos", len(df_filtrado[df_filtrado["Incluso"] == "Sim"]))
+                    col3.metric("Receita de Extras (Não Inclusos)", len(df_filtrado[df_filtrado["Incluso"] == "Não"]))
+                    
+                    # --- GRÁFICO DE HORÁRIOS DE PICO ---
+                    st.markdown("---")
+                    st.subheader("🔥 Mapa de Calor: Horários de Maior Consumo")
+                    st.write("Descubra os picos de lotação do salão por horário e dia da semana.")
+                    
+                    contagem_horas = df_filtrado.groupby(["Dia_Semana", "Faixa_Horario"]).size().reset_index(name="Cafés Servidos")
+                    
+                    if not contagem_horas.empty:
+                        # Ordena os dias e horários para o gráfico ficar bonito
+                        contagem_horas = contagem_horas.sort_values(["Dia_Semana", "Faixa_Horario"])
+                        
+                        fig = px.density_heatmap(
+                            contagem_horas, 
+                            x="Faixa_Horario", 
+                            y="Dia_Semana", 
+                            z="Cafés Servidos",
+                            color_continuous_scale="Oranges", # Cor quente combina com café!
+                            text_auto=True
+                        )
+                        # Remove o numero da frente do dia da semana (ex: 1-Segunda vira Segunda)
+                        fig.update_layout(yaxis=dict(ticktext=[d.split("-")[1] for d in sorted(contagem_horas["Dia_Semana"].unique())], 
+                                                     tickvals=sorted(contagem_horas["Dia_Semana"].unique())))
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("Não há dados de horário suficientes para gerar o gráfico neste período.")
+
+                    # --- EXPORTAÇÃO ---
+                    st.markdown("---")
+                    st.markdown("**Exportar Dados Deste Período:**")
+                    csv = df_filtrado.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Baixar Relatório em Excel/CSV",
+                        data=csv,
+                        file_name=f"Relatorio_Cafe_{titulo_filtro.replace(' ', '_').replace('/', '-')}.csv",
+                        mime="text/csv",
+                    )
         except Exception as e:
-            st.error(f"Erro ao gerar relatórios.")
+            st.error(f"Erro ao gerar relatórios. Detalhe: {e}")
 
     # ==========================================
     # MENU 5: TROCAR SENHA
@@ -468,21 +532,16 @@ def tela_principal():
                         st.error("A nova senha deve ter no mínimo 4 caracteres.")
                     else:
                         try:
-                            # Carrega a tabela de usuários
                             df_usuarios = conn.read(worksheet="Usuarios", ttl=0).dropna(how="all")
                             usuario_logado = st.session_state["usuario_logado"]
                             
-                            # Encontra a linha do usuário logado
                             filtro_usuario = df_usuarios["Usuario"].astype(str) == usuario_logado
                             senha_salva = str(df_usuarios.loc[filtro_usuario, "Senha"].values[0])
                             
                             if senha_atual != senha_salva:
                                 st.error("A senha atual está incorreta.")
                             else:
-                                # Atualiza a senha na tabela
                                 df_usuarios.loc[filtro_usuario, "Senha"] = nova_senha
-                                
-                                # Grava na planilha do Google
                                 conn.update(worksheet="Usuarios", data=df_usuarios)
                                 st.success("Senha alterada com sucesso! Na próxima vez, utilize a sua nova senha.")
                         except Exception as e:
