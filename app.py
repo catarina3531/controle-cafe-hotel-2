@@ -146,7 +146,7 @@ def tela_principal():
                                 if st.button("Gravar Previsão no Banco de Dados", type="primary"):
                                     try:
                                         df_previsao_atual = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
-                                        df_previsao_atual = df_previsao_atual[df_previsao_atual["Data"] != data_str]
+                                        df_previsao_atual = df_previsao_atual[df_previsao_atual["Data"].astype(str) != data_str]
                                         df_atualizado = pd.concat([df_previsao_atual, df_pdf], ignore_index=True)
                                     except:
                                         df_atualizado = df_pdf
@@ -171,11 +171,16 @@ def tela_principal():
             with aba1:
                 try:
                     df_previsao = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
+                    # Força a data para texto (string) para evitar bugs
+                    df_previsao["Data"] = df_previsao["Data"].astype(str)
                     df_previsao = df_previsao[df_previsao["Data"] == data_str]
                     
-                    # Carrega também o consumo de hoje para checar duplicidades
                     df_consumo_atual = conn.read(worksheet="Consumo", ttl=0).dropna(how="all")
-                    df_cons_hoje = df_consumo_atual[df_consumo_atual["Data"] == data_str] if not df_consumo_atual.empty else pd.DataFrame()
+                    if not df_consumo_atual.empty:
+                        df_consumo_atual["Data"] = df_consumo_atual["Data"].astype(str)
+                        df_cons_hoje = df_consumo_atual[df_consumo_atual["Data"] == data_str]
+                    else:
+                        df_cons_hoje = pd.DataFrame()
                 except:
                     st.warning("Erro ao ler o banco de dados.")
                     df_previsao = pd.DataFrame()
@@ -212,10 +217,19 @@ def tela_principal():
                                     prev_chd = int(row["Criancas"])
                                     marcador = "✅ INCLUSO" if incluso == "Sim" else "❌ NÃO INCLUSO (Cobrar Extras)"
                                     
-                                    # Verificador de Duplicidade
+                                    # --- VERIFICADOR DE DUPLICIDADE BLINDADO ---
                                     ja_consumiu = False
                                     if not df_cons_hoje.empty:
-                                        ja_consumiu = not df_cons_hoje[(df_cons_hoje["Quarto"].astype(str) == str(quarto_real)) & (df_cons_hoje["Hospede"] == nome)].empty
+                                        # Limpa os dados do formulário atual
+                                        q_busca = str(quarto_real).lstrip("0").replace(".0", "").strip()
+                                        n_busca = str(nome).strip().lower()
+                                        
+                                        # Limpa os dados que vieram do banco (Google Sheets)
+                                        q_banco = df_cons_hoje["Quarto"].astype(str).str.lstrip("0").str.replace(".0", "", regex=False).str.strip()
+                                        n_banco = df_cons_hoje["Hospede"].astype(str).str.strip().str.lower()
+                                        
+                                        # Verifica se existe alguma linha batendo os dois limpos
+                                        ja_consumiu = not df_cons_hoje[(q_banco == q_busca) & (n_banco == n_busca)].empty
                                     
                                     if ja_consumiu:
                                         teve_duplicidade = True
@@ -260,7 +274,7 @@ def tela_principal():
                                                 for _ in range(item[cat]):
                                                     linhas_para_inserir.append({
                                                         "Data": data_str,
-                                                        "Hora": hora_str, # Salva a Hora!
+                                                        "Hora": hora_str, 
                                                         "Quarto": item["Quarto"],
                                                         "Hospede": item["Hospede"],
                                                         "Categoria": cat,
@@ -301,7 +315,7 @@ def tela_principal():
                             for _ in range(qtd):
                                 linhas_passantes.append({
                                     "Data": data_str,
-                                    "Hora": hora_str, # Salva a Hora!
+                                    "Hora": hora_str, 
                                     "Quarto": "Passante",
                                     "Hospede": nome_passante,
                                     "Categoria": cat,
@@ -331,6 +345,12 @@ def tela_principal():
         try:
             df_previsao = conn.read(worksheet="Previsao", ttl=0).dropna(how="all")
             df_consumo = conn.read(worksheet="Consumo", ttl=0).dropna(how="all")
+            
+            # Formatação das datas para evitar bugs
+            if not df_previsao.empty:
+                df_previsao["Data"] = df_previsao["Data"].astype(str)
+            if not df_consumo.empty:
+                df_consumo["Data"] = df_consumo["Data"].astype(str)
             
             df_prev_hoje = df_previsao[df_previsao["Data"] == data_str] if not df_previsao.empty else pd.DataFrame()
             df_cons_hoje = df_consumo[df_consumo["Data"] == data_str] if not df_consumo.empty else pd.DataFrame()
@@ -407,7 +427,7 @@ def tela_principal():
             st.error("Erro ao carregar Dashboard. O banco de dados pode estar vazio.")
 
     # ==========================================
-    # MENU 4: RELATÓRIOS GERENCIAIS (ATUALIZADO)
+    # MENU 4: RELATÓRIOS GERENCIAIS
     # ==========================================
     elif menu == "4. Relatórios Gerenciais":
         st.header("📈 Relatórios Gerenciais e Inteligência")
@@ -417,25 +437,19 @@ def tela_principal():
             if df_consumo.empty:
                 st.warning("Não há dados de consumo registrados no sistema.")
             else:
-                # Prepara os dados de data e hora
                 df_consumo["Data"] = pd.to_datetime(df_consumo["Data"], errors='coerce')
                 df_consumo["Mes_Ano"] = df_consumo["Data"].dt.strftime("%m/%Y")
                 df_consumo["Ano"] = df_consumo["Data"].dt.strftime("%Y")
                 
-                # Se for dado antigo sem hora, preenche com 08:00 para não quebrar o gráfico
                 if "Hora" not in df_consumo.columns:
                     df_consumo["Hora"] = "08:00"
                 df_consumo["Hora"] = df_consumo["Hora"].fillna("08:00")
                 
-                # Extrai apenas a hora (ex: 07h, 08h)
                 df_consumo["Faixa_Horario"] = df_consumo["Hora"].astype(str).str[:2] + "h"
-                
                 dias_semana = {0: '1-Segunda', 1: '2-Terça', 2: '3-Quarta', 3: '4-Quinta', 4: '5-Sexta', 5: '6-Sábado', 6: '7-Domingo'}
                 df_consumo["Dia_Semana"] = df_consumo["Data"].dt.dayofweek.map(dias_semana)
 
-                # Abas de Filtros Temporais
                 aba_dia, aba_mes, aba_ano = st.tabs(["📅 Visão Diária", "🗓️ Visão Mensal", "📆 Visão Anual"])
-                
                 df_filtrado = pd.DataFrame()
                 titulo_filtro = ""
 
@@ -468,7 +482,6 @@ def tela_principal():
                     col2.metric("Inclusos Consumidos", len(df_filtrado[df_filtrado["Incluso"] == "Sim"]))
                     col3.metric("Receita de Extras (Não Inclusos)", len(df_filtrado[df_filtrado["Incluso"] == "Não"]))
                     
-                    # --- GRÁFICO DE HORÁRIOS DE PICO ---
                     st.markdown("---")
                     st.subheader("🔥 Mapa de Calor: Horários de Maior Consumo")
                     st.write("Descubra os picos de lotação do salão por horário e dia da semana.")
@@ -476,25 +489,21 @@ def tela_principal():
                     contagem_horas = df_filtrado.groupby(["Dia_Semana", "Faixa_Horario"]).size().reset_index(name="Cafés Servidos")
                     
                     if not contagem_horas.empty:
-                        # Ordena os dias e horários para o gráfico ficar bonito
                         contagem_horas = contagem_horas.sort_values(["Dia_Semana", "Faixa_Horario"])
-                        
                         fig = px.density_heatmap(
                             contagem_horas, 
                             x="Faixa_Horario", 
                             y="Dia_Semana", 
                             z="Cafés Servidos",
-                            color_continuous_scale="Oranges", # Cor quente combina com café!
+                            color_continuous_scale="Oranges", 
                             text_auto=True
                         )
-                        # Remove o numero da frente do dia da semana (ex: 1-Segunda vira Segunda)
                         fig.update_layout(yaxis=dict(ticktext=[d.split("-")[1] for d in sorted(contagem_horas["Dia_Semana"].unique())], 
                                                      tickvals=sorted(contagem_horas["Dia_Semana"].unique())))
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("Não há dados de horário suficientes para gerar o gráfico neste período.")
 
-                    # --- EXPORTAÇÃO ---
                     st.markdown("---")
                     st.markdown("**Exportar Dados Deste Período:**")
                     csv = df_filtrado.to_csv(index=False).encode('utf-8')
